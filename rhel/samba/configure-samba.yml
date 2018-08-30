@@ -1,0 +1,107 @@
+---
+- name: Configure a samba share
+  hosts: smbservers
+  tasks:
+    - name: Install software
+      yum:
+        name: "{{ item }}"
+        state: latest
+      with_items:
+        - samba
+        - samba-common
+        - firewalld
+        - policycoreutils-python
+
+    - name: Add groups for samba users
+      group:
+        name: "{{ item.groups }}"
+        state: present
+        system: yes
+      with_items:
+        - "{{ samba_users }}"
+      loop_control:
+        label: Adding group {{ item.groups }}
+
+    - name: Add samba-only users
+      user:
+        name: "{{ item.name }}"
+        groups: "{{ item.groups }}"
+        shell: /sbin/nologin
+        state: present
+      with_items:
+        - "{{ samba_users }}"
+      loop_control:
+        label: Adding user {{ item.name }}
+
+    - name: Create the samba share
+      file:
+        path: "{{ smb_share_dir }}"
+        owner: root
+        group: "{{ smb_share_group }}"
+        mode: '2775'
+        state: directory
+        recurse: true
+        setype: samba_share_t
+
+    - block:
+      - name: Check if context rule already exists
+        shell: semanage fcontext -lC | grep -q "{{ smb_share_dir }}(/.*)?"
+        changed_when: false
+
+      rescue:
+      - name: Add new SELinux context rule
+        command: semanage fcontext -a -t samba_share_t '{{ smb_share_dir }}(/.*)?'
+
+    - name: Insert samba share
+      blockinfile:
+        insertafter: EOF
+        path: /etc/samba/smb.conf
+        content: |
+          [{{ smb_share_name }}]
+          	comment = {{ smb_share_desc }}
+            path = {{ smb_share_dir }}
+          	browseable = Yes
+          	read only = Yes
+            write list = @{{ smb_share_group }}
+            create mask = 0664
+            directory mask = 2775
+          
+    # This task isn't idempotent. The command "pdbedit -L" can be used to list
+    # samba users, but I'm not sure how I could loop through to only add users
+    # that do not already exist.
+    - name: Configure samba user access
+      shell: (echo {{ item.smb_password }}; echo {{ item.smb_password }}) | smbpasswd -a {{ item.name }}
+      with_items:
+        - "{{ samba_users }}"
+      loop_control:
+        label: Running smbpasswd for user {{ item.name }}
+
+    - name: Start and enable services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      with_items:
+        - firewalld
+        - smb
+
+    - name: Allow services through firewalld
+      firewalld:
+        service: "{{ item }}"
+        state: enabled
+        immediate: true
+        permanent: true
+      with_items:
+        - samba
+
+
+- name: Configure samba clients
+  hosts: smbclients
+  tasks:
+    - name: Install software
+      yum:
+        name: "{{ item }}"
+        state: latest
+      with_items:
+        - samba-client
+        - cifs-utils

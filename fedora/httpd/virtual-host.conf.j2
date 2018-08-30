@@ -1,0 +1,14 @@
+<VirtualHost *:80>
+    ServerAdmin webmaster@{{ item.hostname }}
+    DocumentRoot "/srv/{{ item.hostname_alias }}/www/html"
+    ServerName {{ item.hostname }}
+    ServerAlias {{ item.hostname_alias }}
+    ErrorLog "/var/log/httpd/{{ item.hostname_alias }}-error_log"
+    CustomLog "/var/log/httpd/{{ item.hostname_alias }}-access_log" common
+</VirtualHost>
+
+<Directory "/srv/{{ item.hostname_alias }}/www/html">
+    Options Indexes FollowSymLinks
+    AllowOverride None
+    Require all granted
+</Directory>

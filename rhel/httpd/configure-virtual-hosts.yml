@@ -1,0 +1,122 @@
+---
+- name: Configure Name-Based Virtual Hosts
+  hosts: localhost
+  vars:
+    virtual_hosts:
+      - hostname: 
+        hostname_alias: 
+        group_owner: 
+        git_repo: 
+        ssl: 
+    ipa:
+      host:
+      pass:
+      port:
+      prot:
+      user:
+      validate_certs: no
+      zone_name: angelesphillips.com
+
+  tasks:
+    - name: Install software
+      dnf:
+        name: "{{ item }}"
+        state: latest
+      with_items:
+        - firewalld
+        - httpd
+        - mod_ssl
+        - php
+        - policycoreutils-python-utils
+
+    - name: Start and enable services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      with_items:
+        - firewalld
+        - httpd
+
+    - name: Add DNS records with the IPA server
+      ipa_dnsrecord:
+        ipa_host: "{{ ipa.host }}"
+        ipa_pass: "{{ ipa.pass }}"
+        ipa_port: "{{ ipa.port }}"
+        ipa_prot: "{{ ipa.prot }}"
+        ipa_user: "{{ ipa.user }}"
+        validate_certs: "{{ ipa.validate_certs }}"
+        zone_name: "{{ ipa.zone_name }}"
+        record_name: "{{ item.hostname_alias }}"
+        record_type: A
+        record_value: "{{ ansible_default_ipv4.address }}"
+        state: present
+      with_items:
+        - "{{ virtual_hosts }}"
+
+    - name: Configure regular host config files
+      template:
+        src: virtual-host.conf.j2
+        dest: /etc/httpd/conf.d/{{ item.hostname_alias }}.conf
+      with_items:
+        - "{{ virtual_hosts }}"
+      when: item.ssl == "false"
+      notify:
+        - restart_httpd
+
+    - name: Configure ssl host config files
+      template:
+        src: virtual-host-ssl.conf.j2
+        dest: /etc/httpd/conf.d/{{ item.hostname_alias }}-ssl.conf
+      with_items:
+        - "{{ virtual_hosts }}"
+      when: item.ssl == "true"
+      notify:
+        - restart_httpd
+
+    - name: Download ssl cert and key
+      
+    
+    - name: Create groups for web content
+      group:
+        name: "{{ item.group_owner }}"
+        system: true
+      with_items:
+        - "{{ virtual_hosts }}"
+
+    - name: Create host directories
+      file:
+        path: /srv/{{ item.hostname_alias }}/www/html
+        state: directory
+        recurse: true
+        mode: '2775'
+        group: "{{ item.group_owner }}"
+      with_items:
+        - "{{ virtual_hosts }}"
+
+    - name: Populate website content
+      git:
+        repo: "{{ item.git_repo }}"
+        dest: /srv/{{ item.hostname_alias }}/www/html
+        accept_hostkey: yes
+      with_items:
+        - "{{ virtual_hosts }}"
+
+    - name: Restore SELinux context to host directories
+      command: restorecon -RF /srv
+
+    - name: Allow services through firewalld
+      firewalld:
+        service: "{{ item }}"
+        state: enabled
+        immediate: true
+        permanent: true
+      with_items:
+        - http
+        - https
+
+  handlers:
+    - name: restart_httpd
+      service:
+        name: httpd
+        state: restarted

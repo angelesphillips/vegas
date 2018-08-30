@@ -1,0 +1,132 @@
+---
+- name: Create a partition and a logical volume for iSCSI backstores
+  hosts: localhost
+  tasks:
+    - name: Set the device to vda
+      include_vars: vars/device-vda.yml
+      when: ansible_devices.vda.size == "3.00 GB"
+
+    - name: Set the device to vdb
+      include_vars: vars/device-vdb.yml
+      when: ansible_devices.vdb.size == "3.00 GB"
+
+    - name: Create a partition to be used as a PV
+      parted:
+        device: "{{ device }}"
+        number: 1
+        flags: [ lvm ]
+        state: present
+        part_end: 1GiB
+
+    - block:
+        - name: Check if {{ partition_pv }} is already a physical volume
+          shell: pvs | grep -q {{ partition_pv }}
+          changed_when: false
+
+      rescue:
+        - name: Make {{ partition_pv }} a physical volume
+          command: pvcreate {{ partition_pv }}
+
+    - block:
+        - name: Check if the iSCSI_vg volume group already exists
+          shell: vgs | grep -q iSCSI_vg
+          changed_when: false
+
+      rescue:
+        - name: Create the iSCSI_vg volume group
+          command: vgcreate iSCSI_vg {{ partition_pv }}
+
+    - name: Create logical volume for iSCSI block backstore
+      lvol:
+        pvs: "{{ partition_pv }}"
+        vg: iSCSI_vg
+        lv: disk1_lv
+        size: 100
+
+    - name: Create a partition for iSCSI block backstore
+      parted:
+        device: "{{ device }}"
+        number: 2
+        state: present
+        part_start: 1GiB
+        part_end: 2GiB
+
+
+- name: Configure Portal
+  hosts: localhost
+  vars:
+    backstores:
+      - name: block1
+        type: block
+        path: /dev/iSCSI_vg/disk1_lv
+        size: ""
+      
+      - name: block2
+        type: block
+        path: /dev/vdb2
+        size: ""
+
+      - name: file1
+        type: fileio
+        path: /var/file1
+        size: 100M
+
+    iscsi_target_iqn: iqn.2014-06.com.example:target
+    iscsi_initiator_iqn: iqn.2014-06.com.example:test
+
+  tasks:
+    - name: Install software
+      dnf:
+        name: "{{ item }}"
+        state: latest
+      with_items:
+        - firewalld
+        - targetcli
+
+    # To match up with our classroom lab, a task should
+    # create a new logical volume or a new partition.
+
+    # Since the following tasks will use the command module (and not be idempotent),
+    # maybe a block could first test to see if this has already been done.
+    - block:
+        - name: Check if iSCSI target already seems configured
+          command: grep -q "{{ iscsi_target_iqn }}" /etc/target/saveconfig.json
+          changed_when: false
+
+      rescue:
+        - name: Create iSCSI backstore(s)
+          command: targetcli /backstores/{{ item.type }} create {{ item.name }} {{ item.path }} {{ item.size }}
+          with_items:
+            - "{{ backstores }}"
+
+        - name: Create the iSCSI target
+          command: targetcli /iscsi create {{ iscsi_target_iqn }}
+
+        - name: Create the iSCSI acl
+          command: targetcli /iscsi/{{ iscsi_target_iqn }}/tpg1/acls create {{ iscsi_initiator_iqn }}
+
+        - name: Create the iSCSI lun(s)
+          command: targetcli /iscsi/{{ iscsi_target_iqn }}/tpg1/luns create /backstores/{{ item.type }}/{{ item.name }}
+          with_items:
+            - "{{ backstores }}"
+
+        - name: Save the iSCSI config
+          command: targetcli saveconfig
+
+    - name: Start and enable services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      with_items:
+        - firewalld
+        - target
+
+    - name: Allow services through the firewalld
+      firewalld:
+        service: "{{ item }}"
+        state: enabled
+        immediate: true
+        permanent: true
+      with_items:
+        - iscsi-target
