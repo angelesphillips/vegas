@@ -12,19 +12,29 @@
         - firewalld
         - policycoreutils-python
 
-    - name: Add groups for samba users
+    - name: Add groups for samba share
       group:
-        name: "{{ item.groups }}"
+        name: "{{ item.name }}"
         state: present
         system: yes
       with_items:
-        - "{{ samba_users }}"
+        - "{{ samba_group_perms }}"
+      when: item.name_type == "group"
       loop_control:
-        label: Adding group {{ item.groups }}
+        label: Adding group {{ item.name }}
+
+    - name: Add share owner groups
+      group:
+        name: "{{ item }}"
+        state: present
+        system: yes
+      with_items:
+        - "{{ smb_share_group }}"
 
     - name: Add samba-only users
       user:
         name: "{{ item.name }}"
+        comment: "{{ item.full_name }}"
         groups: "{{ item.groups }}"
         shell: /sbin/nologin
         state: present
@@ -32,6 +42,14 @@
         - "{{ samba_users }}"
       loop_control:
         label: Adding user {{ item.name }}
+
+    - name: Add additional users
+      user:
+        name: "{{ item.name }}"
+        state: present
+      with_items:
+        - "{{ samba_group_perms }}"
+      when: item.name_type == "user"
 
     - name: Create the samba share
       file:
@@ -43,6 +61,41 @@
         recurse: true
         setype: samba_share_t
 
+    # Unfortunately these ACL aren't working quite as expected.
+    # They end up using the group ids on the server where they
+    # are created (the samba server). On the client, if the
+    # group id maps to a different group than the name added
+    # to the acl, access isn't given. If the samba user belongs
+    # to the group which owns the directory, then everything
+    # is fine. Using a network directory such as IPA would
+    # likely aleviate this problem.
+    - name: Add ACL access to the samba share
+      acl:
+        path: "{{ smb_share_dir }}"
+        entity: "{{ item.name }}"
+        etype: "{{ item.name_type }}"
+        permissions: "{{ item.perms }}"
+        default: "{{ item.default }}"
+        state: present
+      with_items:
+        - "{{ samba_group_perms }}"
+      loop_control:
+        label: Adding ACL permissions on {{ smb_share_dir }} for {{ item.name }}.
+
+    - name: Add regular ACL access to the samba share
+      acl:
+        path: "{{ smb_share_dir }}"
+        entity: "{{ item.name }}"
+        etype: "{{ item.name_type }}"
+        permissions: "{{ item.perms }}"
+        default: false
+        state: present
+      with_items:
+        - "{{ samba_group_perms }}"
+      when: item.default
+      loop_control:
+        label: Adding regular ACL permissions on {{ smb_share_dir }} for {{ item.name }}.
+
     - block:
       - name: Check if context rule already exists
         shell: semanage fcontext -lC | grep -q "{{ smb_share_dir }}(/.*)?"
@@ -52,6 +105,10 @@
       - name: Add new SELinux context rule
         command: semanage fcontext -a -t samba_share_t '{{ smb_share_dir }}(/.*)?'
 
+    # It's possible that the ACL issue that I'm having above could be solved
+    # by adding additional groups/users to the "write list" line.
+    # I also haven't tried making the samba shares and array and then looping
+    # over it, but it should be possible.
     - name: Insert samba share
       blockinfile:
         insertafter: EOF
@@ -93,7 +150,6 @@
         permanent: true
       with_items:
         - samba
-
 
 - name: Configure samba clients
   hosts: smbclients
