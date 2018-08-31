@@ -122,6 +122,8 @@
             write list = @{{ smb_share_group }}
             create mask = 0664
             directory mask = 2775
+      notify:
+        - restart_smb
           
     # This task isn't idempotent. The command "pdbedit -L" can be used to list
     # samba users, but I'm not sure how I could loop through to only add users
@@ -150,6 +152,12 @@
         permanent: true
       with_items:
         - samba
+
+  handlers:
+    - name: restart_smb
+      service:
+        name: smb
+        state: restarted
 
 - name: Configure samba clients
   hosts: smbclients
