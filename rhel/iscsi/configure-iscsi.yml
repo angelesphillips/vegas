@@ -1,14 +1,20 @@
 ---
 - name: Create a partition and a logical volume for iSCSI backstores
-  hosts: localhost
+  hosts: iscsi-portal
   tasks:
+
+    # /dev/vda and /dev/vdb have been known to flip on occasion.
+    # In the classroom environment, the unpartitioned disk should
+    # be 1 GB in size. These two tasks will set appropriate variables
+    # based on whichever disk happens to be 1 GB in size.
+
     - name: Set the device to vda
       include_vars: vars/device-vda.yml
-      when: ansible_devices.vda.size == "3.00 GB"
+      when: ansible_devices.vda.size == "1.00 GB"
 
     - name: Set the device to vdb
       include_vars: vars/device-vdb.yml
-      when: ansible_devices.vdb.size == "3.00 GB"
+      when: ansible_devices.vdb.size == "1.00 GB"
 
     - name: Create a partition to be used as a PV
       parted:
@@ -16,7 +22,7 @@
         number: 1
         flags: [ lvm ]
         state: present
-        part_end: 1GiB
+        part_end: 1026047s
 
     - block:
         - name: Check if {{ partition_pv }} is already a physical volume
@@ -48,12 +54,10 @@
         device: "{{ device }}"
         number: 2
         state: present
-        part_start: 1GiB
-        part_end: 2GiB
-
+        part_start: 1026048s
 
 - name: Configure Portal
-  hosts: localhost
+  hosts: iscsi-portal
   vars:
     backstores:
       - name: block1
@@ -71,29 +75,35 @@
         path: /var/file1
         size: 100M
 
-    iscsi_target_iqn: iqn.2014-06.com.example:target
-    iscsi_initiator_iqn: iqn.2014-06.com.example:test
-
   tasks:
+    - name: Set portal facts
+      set_fact:
+        iscsi_target_iqn: iqn.2014-06.com.example:{{ ansible_hostname }}
+      when: inventory_hostname in groups['iscsi-portal']
+
     - name: Install software
-      dnf:
+      yum:
         name: "{{ item }}"
         state: latest
       with_items:
         - firewalld
         - targetcli
 
-    # To match up with our classroom lab, a task should
-    # create a new logical volume or a new partition.
-
-    # Since the following tasks will use the command module (and not be idempotent),
-    # maybe a block could first test to see if this has already been done.
     - block:
         - name: Check if iSCSI target already seems configured
           command: grep -q "{{ iscsi_target_iqn }}" /etc/target/saveconfig.json
           changed_when: false
 
       rescue:
+        - name: Grab initiator facts
+          setup:
+          delegate_to: "{{ item }}"
+          with_items: "{{ groups['iscsi-initiator'] }}"
+
+        - name: Set initiator facts
+          set_fact:
+            initiator_iqn_acl: iqn.2014-06.com.example:{{ ansible_hostname }}
+
         - name: Create iSCSI backstore(s)
           command: targetcli /backstores/{{ item.type }} create {{ item.name }} {{ item.path }} {{ item.size }}
           with_items:
@@ -103,7 +113,7 @@
           command: targetcli /iscsi create {{ iscsi_target_iqn }}
 
         - name: Create the iSCSI acl
-          command: targetcli /iscsi/{{ iscsi_target_iqn }}/tpg1/acls create {{ iscsi_initiator_iqn }}
+          command: targetcli /iscsi/{{ iscsi_target_iqn }}/tpg1/acls create {{ initiator_iqn_acl }}
 
         - name: Create the iSCSI lun(s)
           command: targetcli /iscsi/{{ iscsi_target_iqn }}/tpg1/luns create /backstores/{{ item.type }}/{{ item.name }}
@@ -130,3 +140,48 @@
         permanent: true
       with_items:
         - iscsi-target
+
+- name: Configure the iSCSI Initiator
+  hosts: iscsi-initiator
+  tasks:
+    - name: Install software
+      yum:
+        name: "{{ item }}"
+        state: latest
+      with_items:
+        - iscsi-initiator-utils
+
+    - name: Set the initiator iqn
+      template:
+        src: initiatorname.iscsi.j2 
+        dest: /etc/iscsi/initiatorname.iscsi
+      register: initiatorname
+
+    - name: Restart iscsi
+      service:
+        name: iscsi
+        state: restarted
+      when: initiatorname.changed
+
+    - name: Restart iscsid
+      service:
+        name: iscsid
+        state: restarted
+      when: initiatorname.changed
+
+    - name: Grab portal facts
+      setup:
+      delegate_to: "{{ item }}"
+      with_items: "{{ groups['iscsi-portal'] }}"
+
+    - name: Set portal facts
+      set_fact:
+        iscsi_portal_hostname: "{{ ansible_fqdn }}"
+        iscsi_portal_ip: "{{ ansible_default_ipv4.address }}"
+
+    - name: Discover and log in to the iSCSI portal
+      open_iscsi:
+        portal: "{{ iscsi_portal_ip }}"
+        discover: yes
+        login: yes
+

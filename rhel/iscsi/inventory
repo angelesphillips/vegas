@@ -1,1 +1,5 @@
-localhost ansible_python_interpreter=/usr/bin/python3
+[iscsi-portal]
+servera.lab.example.com
+
+[iscsi-initiator]
+serverb.lab.example.com
